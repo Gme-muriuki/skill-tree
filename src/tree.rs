@@ -1,6 +1,5 @@
 use anyhow::Context;
-use fehler::throws;
-use serde_derive::Deserialize;
+use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -148,18 +147,15 @@ impl SkillTree {
         Ok(())
     }
 
-    #[throws(anyhow::Error)]
-    pub fn parse(text: &str) -> SkillTree {
-        toml::from_str(text)?
+    pub fn parse(text: &str) -> anyhow::Result<SkillTree> {
+        Ok(toml::from_str(text)?)
     }
 
-    #[throws(anyhow::Error)]
-    pub fn validate(&self) {
-        // gather: valid requires entries
-
+    pub fn validate(&self) -> anyhow::Result<()> {
         for group in self.groups() {
             group.validate(self)?;
         }
+        Ok(())
     }
 
     pub fn groups(&self) -> impl Iterator<Item = &Group> {
@@ -200,8 +196,7 @@ impl SkillTree {
 }
 
 impl Group {
-    #[throws(anyhow::Error)]
-    pub fn validate(&self, tree: &SkillTree) {
+    pub fn validate(&self, tree: &SkillTree) -> anyhow::Result<()> {
         // check: that `name` is a valid graphviz identifier
 
         // check: each of the things in requires has the form
@@ -221,6 +216,8 @@ impl Group {
         for item in &self.items {
             item.validate()?;
         }
+
+        Ok(())
     }
 
     pub fn items(&self) -> impl Iterator<Item = &Item> {
@@ -232,10 +229,7 @@ pub trait ItemExt {
     fn href(&self) -> Option<&String>;
     fn label(&self) -> &String;
     fn column_value<'me>(&'me self, tree: &'me SkillTree, c: &str) -> &'me str;
-
-    #[allow(redundant_semicolons)] // bug in "throws"
-    #[throws(anyhow::Error)]
-    fn validate(&self);
+    fn validate(&self) -> anyhow::Result<()>;
 }
 
 impl ItemExt for Item {
@@ -263,12 +257,13 @@ impl ItemExt for Item {
         ""
     }
 
-    #[throws(anyhow::Error)]
-    fn validate(&self) {
+    fn validate(&self) -> anyhow::Result<()> {
         // check: each of the things in requires has the form
         //        `identifier` or `identifier:port` and that all those
         //        identifiers map to groups
 
         // check: only contains known keys
+
+        Ok(())
     }
 }

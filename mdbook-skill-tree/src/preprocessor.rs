@@ -1,7 +1,7 @@
 use mdbook::book::{Book, BookItem};
 use mdbook::errors::{Error, Result};
 use mdbook::preprocess::{Preprocessor, PreprocessorContext};
-use pulldown_cmark::{CodeBlockKind::*, Event, Options, Parser, Tag};
+use pulldown_cmark::{CodeBlockKind::*, Event, Options, Parser, Tag, TagEnd};
 use pulldown_cmark_to_cmark::cmark;
 use serde_json::json;
 use skill_tree::SkillTree;
@@ -50,6 +50,7 @@ fn add_skill_tree(content: &str, counter: &mut usize) -> Result<String> {
     opts.insert(Options::ENABLE_TASKLISTS);
 
     let events = Parser::new_ext(content, opts).map(|e| {
+        // Detect the opening of a skill-tree fenced code block.
         if let Event::Start(Tag::CodeBlock(Fenced(code))) = e.clone() {
             if &*code == "skill-tree" {
                 in_skill_tree_block = true;
@@ -60,20 +61,21 @@ fn add_skill_tree(content: &str, counter: &mut usize) -> Result<String> {
             }
         }
 
+        // Pass through everything that isn't inside a skill-tree block.
         if !in_skill_tree_block {
             return Some(e);
         }
 
+        // We are inside a skill-tree block — handle events.
         match e {
-            Event::End(Tag::CodeBlock(Fenced(code))) => {
-                assert_eq!(
-                    "skill-tree", &*code,
-                    "After an opening sjill-tree code block we expect it to close again"
-                );
+            // In pulldown-cmark 0.9+, Event::End carries a TagEnd which does not
+            // include the code block's language string, so we just match the variant.
+            Event::End(TagEnd::CodeBlock) => {
                 in_skill_tree_block = false;
 
                 let graphviz_text_or_err = SkillTree::parse(&skill_tree_content)
                     .and_then(|skill_tree| skill_tree.to_graphviz());
+
                 let js_value = match graphviz_text_or_err {
                     Ok(text) => json!({
                         "dot_text": text,
@@ -81,7 +83,7 @@ fn add_skill_tree(content: &str, counter: &mut usize) -> Result<String> {
                     }),
 
                     // FIXME -- we should serialize this into something that displays the error
-                    // when rendered
+                    // when rendered, rather than panicking the whole mdbook build.
                     Err(e) => panic!("encountered error {} parsing {:?}", e, skill_tree_content),
                 };
 
@@ -89,15 +91,12 @@ fn add_skill_tree(content: &str, counter: &mut usize) -> Result<String> {
                 let id = *counter;
                 *counter += 1;
 
-                // Generate a "div" where the rendered code will go with
-                // a unique `id`.
+                // Generate a "div" where the rendered SVG will be inserted.
                 let mut html_code = String::new();
                 write!(&mut html_code, "<div id='skill-tree-{}'>", id).unwrap();
                 write!(&mut html_code, "</div>\n\n").unwrap();
 
-                // Generate a script tag to insert the rendered skill-tree
-                // content. It is given a string argument with the graphviz
-                // output we can pass to viz-js.
+                // Generate a script tag that queues this tree for rendering.
                 write!(
                     &mut html_code,
                     r#"<script>
@@ -107,18 +106,21 @@ fn add_skill_tree(content: &str, counter: &mut usize) -> Result<String> {
                     id, js_value
                 )
                 .unwrap();
-                return Some(Event::Html(html_code.into()));
+
+                Some(Event::Html(html_code.into()))
             }
             Event::Text(code) => {
                 skill_tree_content.push_str(&code);
+                None
             }
-            _ => return Some(e),
+            _ => Some(e),
         }
-
-        None
     });
+
     let events = events.filter_map(|e| e);
-    cmark(events, &mut buf, None)
+
+    // pulldown-cmark-to-cmark 11+ removed the options parameter.
+    cmark(events, &mut buf)
         .map(|_| buf)
         .map_err(|err| Error::msg(format!("Markdown serialization failed: {}", err)))
 }

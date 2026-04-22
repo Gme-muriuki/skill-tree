@@ -2,7 +2,7 @@
 name = "mdbook-skill-tree"
 version = "3.0.0"
 authors = ["Niko Matsakis <niko@alum.mit.edu>"]
-edition = "2018"
+edition = "2021"
 description = "mdbook plugin to show roadmaps"
 license = "MIT"
 repository = "https://github.com/nikomatsakis/skill-tree"
@@ -10,16 +10,15 @@ homepage = "https://github.com/nikomatsakis/skill-tree"
 
 [dependencies]
 anyhow = "1.0"
-skill-tree = { version="3.0.0", path=".." }
-mdbook = "0.4.7"
-pulldown-cmark = "0.7.0"
-pulldown-cmark-to-cmark = "4.0.0"
-env_logger = "0.7.1"
+skill-tree = { version = "3.0.0", path = ".." }
+mdbook = "0.4"
+pulldown-cmark = "0.10"
+pulldown-cmark-to-cmark = "13"
+env_logger = "0.11"
 log = "0.4"
-clap = "2.33"
+clap = { version = "4", features = ["derive"] }
 serde_json = "1.0"
-toml_edit = "0.1.5"
-fehler = "1.0.0-alpha.2"
+toml_edit = "0.22"
 
 [dev-dependencies]
 regex = "1.0"

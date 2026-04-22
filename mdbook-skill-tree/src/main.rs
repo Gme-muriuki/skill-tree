@@ -1,6 +1,5 @@
 use anyhow::Context;
-use clap::{crate_version, App, Arg, ArgMatches, SubCommand};
-use fehler::throws;
+use clap::{Parser, Subcommand};
 use mdbook::errors::Error;
 use mdbook::preprocess::{CmdPreprocessor, Preprocessor};
 use std::{
@@ -9,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     process,
 };
-use toml_edit::{value, Array, Document, Item, Table, Value};
+use toml_edit::{value, Array, DocumentMut, Item, Table, Value};
 
 mod preprocessor;
 use preprocessor::SkillTreePreprocessor;
@@ -49,42 +48,43 @@ const ADDITIONAL_FILES: &[AdditionalFile] = &[
     },
 ];
 
-pub fn make_app() -> App<'static, 'static> {
-    App::new("mdbook-skill-tree")
-        .version(crate_version!())
-        .about("mdbook preprocessor to add skill-tree support")
-        .subcommand(
-            SubCommand::with_name("supports")
-                .arg(Arg::with_name("renderer").required(true))
-                .about("Check whether a renderer is supported by this preprocessor"),
-        )
-        .subcommand(
-            SubCommand::with_name("install")
-                .arg(
-                    Arg::with_name("dir")
-                    .default_value(".")
-                    .help("Root directory for the book,\nshould contain the configuration file (`book.toml`)")
-                    )
-                .about("]Install the required assset files and include it in the config"),
-        )
+/// mdbook preprocessor to add skill-tree support
+#[derive(Parser)]
+#[command(name = "mdbook-skill-tree", version)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
 }
 
-#[throws(anyhow::Error)]
-fn main() {
-    env_logger::from_env(env_logger::Env::default().default_filter_or("info")).init();
+#[derive(Subcommand)]
+enum Command {
+    /// Check whether a renderer is supported by this preprocessor
+    Supports { renderer: String },
+    /// Install the required asset files and include them in the config
+    Install {
+        /// Root directory for the book, should contain the configuration file (`book.toml`)
+        #[arg(default_value = ".")]
+        dir: String,
+    },
+}
 
-    let matches = make_app().get_matches();
+fn main() -> anyhow::Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    if let Some(sub_args) = matches.subcommand_matches("supports") {
-        handle_supports(sub_args);
-    } else if let Some(sub_args) = matches.subcommand_matches("install") {
-        handle_install(sub_args)?;
-    } else {
-        if let Err(e) = handle_preprocessing() {
-            eprintln!("{}", e);
-            process::exit(1);
+    let cli = Cli::parse();
+
+    match cli.command {
+        Some(Command::Supports { renderer }) => handle_supports(&renderer),
+        Some(Command::Install { dir }) => handle_install(&dir)?,
+        None => {
+            if let Err(e) = handle_preprocessing() {
+                eprintln!("{}", e);
+                process::exit(1);
+            }
         }
     }
+
+    Ok(())
 }
 
 fn handle_preprocessing() -> Result<(), Error> {
@@ -105,9 +105,8 @@ fn handle_preprocessing() -> Result<(), Error> {
     Ok(())
 }
 
-fn handle_supports(sub_args: &ArgMatches) -> ! {
-    let renderer = sub_args.value_of("renderer").expect("Required argument");
-    let supported = SkillTreePreprocessor.supports_renderer(&renderer);
+fn handle_supports(renderer: &str) -> ! {
+    let supported = SkillTreePreprocessor.supports_renderer(renderer);
 
     // Signal whether the renderer is supported by exiting with 1 or 0.
     if supported {
@@ -117,9 +116,7 @@ fn handle_supports(sub_args: &ArgMatches) -> ! {
     }
 }
 
-#[throws(anyhow::Error)]
-fn handle_install(sub_args: &ArgMatches) {
-    let dir = sub_args.value_of("dir").expect("Required argument");
+fn handle_install(dir: &str) -> anyhow::Result<()> {
     let proj_dir = PathBuf::from(dir);
     let config = proj_dir.join("book.toml");
 
@@ -131,7 +128,7 @@ fn handle_install(sub_args: &ArgMatches) {
     log::info!("Reading configuration file {}", config.display());
     let toml = fs::read_to_string(&config).expect("can't read configuration file");
     let mut doc = toml
-        .parse::<Document>()
+        .parse::<DocumentMut>()
         .expect("configuration is not valid TOML");
 
     let has_pre = has_preprocessor(&mut doc);
@@ -143,7 +140,7 @@ fn handle_install(sub_args: &ArgMatches) {
     let added_additional_files = add_additional_files(&mut doc);
     if !has_pre || added_additional_files {
         log::info!("Saving changed configuration to {}", config.display());
-        let toml = doc.to_string_in_original_order();
+        let toml = doc.to_string();
         let mut file = File::create(config).expect("can't open configuration file for writing.");
         file.write_all(toml.as_bytes())
             .expect("can't write configuration");
@@ -178,18 +175,22 @@ fn handle_install(sub_args: &ArgMatches) {
             .with_context(|| format!("creating static file `{}`", output_path.display()))?;
     }
 
-    log::info!("Files & configuration for mdbook-skill-tree are installed. You can start using it in your book.");
+    log::info!(
+        "Files & configuration for mdbook-skill-tree are installed. \
+         You can start using it in your book."
+    );
+    Ok(())
 }
 
-#[throws(anyhow::Error)]
-fn write_static_file(output_path: &Path, file_text: &[u8]) {
+fn write_static_file(output_path: &Path, file_text: &[u8]) -> anyhow::Result<()> {
     let mut file = File::create(output_path)?;
-    file.write_all(&file_text)?;
+    file.write_all(file_text)?;
+    Ok(())
 }
 
-fn add_additional_files(doc: &mut Document) -> bool {
+fn add_additional_files(doc: &mut DocumentMut) -> bool {
     let mut changed = false;
-    let mut printed = true;
+    let mut printed = false;
 
     for file in ADDITIONAL_FILES {
         let additional = additional(doc, file.ty);
@@ -213,22 +214,20 @@ fn add_additional_files(doc: &mut Document) -> bool {
     changed
 }
 
-fn additional<'a>(doc: &'a mut Document, additional_type: &str) -> Option<&'a mut Array> {
-    let doc = doc.as_table_mut();
-
-    let item = doc.entry("output");
-    let item = item
-        .or_insert(empty_implicit_table())
+/// Returns a mutable reference to the `additional-{type}` array under `[output.html]`
+/// if it already exists, or `None` otherwise.
+fn additional<'a>(doc: &'a mut DocumentMut, additional_type: &str) -> Option<&'a mut Array> {
+    doc.as_table_mut()
+        .get_mut("output")?
         .as_table_mut()?
-        .entry("html");
-    let item = item
-        .or_insert(empty_implicit_table())
+        .get_mut("html")?
         .as_table_mut()?
-        .entry(&format!("additional-{}", additional_type));
-    item.as_array_mut()
+        .get_mut(&format!("additional-{}", additional_type))?
+        .as_value_mut()?
+        .as_array_mut()
 }
 
-fn has_preprocessor(doc: &mut Document) -> bool {
+fn has_preprocessor(doc: &mut DocumentMut) -> bool {
     matches!(doc["preprocessor"]["skill-tree"], Item::Table(_))
 }
 
@@ -238,7 +237,7 @@ fn empty_implicit_table() -> Item {
     Item::Table(empty_table)
 }
 
-fn add_preprocessor(doc: &mut Document) {
+fn add_preprocessor(doc: &mut DocumentMut) {
     let doc = doc.as_table_mut();
 
     let item = doc.entry("preprocessor").or_insert(empty_implicit_table());
@@ -260,7 +259,7 @@ fn has_file(elem: &Option<&mut Array>, file: &str) -> bool {
     }
 }
 
-fn insert_additional(doc: &mut Document, additional_type: &str, file: &str) {
+fn insert_additional(doc: &mut DocumentMut, additional_type: &str, file: &str) {
     let doc = doc.as_table_mut();
 
     let empty_table = Item::Table(Table::default());
