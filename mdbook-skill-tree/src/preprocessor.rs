@@ -38,6 +38,24 @@ impl Preprocessor for SkillTreePreprocessor {
     }
 }
 
+fn render_error_html(err: &anyhow::Error, source: &str) -> String {
+    let escaped_err = html_escape::encode_text(&err.to_string()).to_string();
+    let escaped_src = html_escape::encode_text(source).to_string();
+
+    format!(
+        r#"
+        <div class = "skill-tree-error" style = "border:2px solid #c0392b; border-radius:4px;padding:1em;margin:1em 0;background:#fdf0ef;color:#c0392b;font-family:monospace>
+          <strong>skill-tree error</strong>
+          <pre style="margin:0.5em 0 0; white-space:pre-wrap" > {escaped_err} </pre>
+          <details style="margin-top:0.5em>
+            <summary style="cursor:pointer;color:#888"> show source </summary>
+            <pre style="margin:0.5em 0 0;color:#333;font-size:0.9em;white-space:pre-wrap> {escaped_src} </pre>
+          </detils>
+        </div>
+      "#
+    )
+}
+
 fn add_skill_tree(content: &str, counter: &mut usize) -> Result<String> {
     let mut buf = String::with_capacity(content.len());
     let mut skill_tree_content = String::new();
@@ -68,50 +86,52 @@ fn add_skill_tree(content: &str, counter: &mut usize) -> Result<String> {
 
         // We are inside a skill-tree block — handle events.
         match e {
-            // In pulldown-cmark 0.9+, Event::End carries a TagEnd which does not
-            // include the code block's language string, so we just match the variant.
             Event::End(TagEnd::CodeBlock) => {
                 in_skill_tree_block = false;
-
-                let graphviz_text_or_err = SkillTree::parse(&skill_tree_content)
+                let graphviz = SkillTree::parse(&skill_tree_content)
                     .and_then(|skill_tree| skill_tree.to_graphviz());
 
-                let js_value = match graphviz_text_or_err {
-                    Ok(text) => json!({
-                        "dot_text": text,
-                        "error": "",
-                    }),
+                let html_code = match graphviz {
+                    Ok(dot_text) => {
+                        let js_value = json!({
+                          "dot_text": dot_text,
+                          "error": "",
+                        });
 
-                    // FIXME -- we should serialize this into something that displays the error
-                    // when rendered, rather than panicking the whole mdbook build.
-                    Err(e) => panic!("encountered error {} parsing {:?}", e, skill_tree_content),
+                        let id = *counter;
+                        *counter += 1;
+
+                        let mut html = String::new();
+
+                        write!(&mut html, "<div id='skill-tree-{}'>", id).unwrap();
+                        write!(&mut html, "</div>\n\n").unwrap();
+
+                        write!(
+                            &mut html,
+                            r#"<script>
+                          if (!window.SKILL_TREES) window.SKILL_TREES = [];
+                          window.SKILL_TREES.push({{id: 'skill-tree-{}', value: {} }})
+                          </script>"#,
+                            id, js_value
+                        )
+                        .unwrap();
+
+                        html
+                    }
+                    Err(err) => {
+                        log::warn!("skill-tree: failed to render block: {}", err);
+
+                        render_error_html(&err, &skill_tree_content)
+                    }
                 };
-
-                // Get a fresh id for this block.
-                let id = *counter;
-                *counter += 1;
-
-                // Generate a "div" where the rendered SVG will be inserted.
-                let mut html_code = String::new();
-                write!(&mut html_code, "<div id='skill-tree-{}'>", id).unwrap();
-                write!(&mut html_code, "</div>\n\n").unwrap();
-
-                // Generate a script tag that queues this tree for rendering.
-                write!(
-                    &mut html_code,
-                    r#"<script>
-                    if (!window.SKILL_TREES) window.SKILL_TREES = [];
-                    window.SKILL_TREES.push({{id:'skill-tree-{}', value:{}}});
-                    </script>"#,
-                    id, js_value
-                )
-                .unwrap();
 
                 Some(Event::Html(html_code.into()))
             }
             Event::Text(code) => {
-                skill_tree_content.push_str(&code);
-                None
+                for code in code.chars() {
+                    skill_tree_content.push(code);
+                }
+                None 
             }
             _ => Some(e),
         }
