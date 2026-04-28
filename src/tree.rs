@@ -1,9 +1,11 @@
 use anyhow::Context;
-use serde::Deserialize;
+use serde::{Deserialize, de::Visitor};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
+
+use crate::error::SkillTreeError;
 
 #[derive(Debug, Deserialize)]
 pub struct SkillTree {
@@ -54,12 +56,19 @@ pub struct Group {
 #[derive(Copy, Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash)]
 pub struct GroupIndex(pub usize);
 
-pub type Item = HashMap<String, String>;
+#[derive(Debug, Clone)]
+pub struct Item {
+    pub label: String,
+    pub href: Option<String>,
+    pub status: Option<Status>,
+    pub attrs: HashMap<String, String>,
+}
 
 #[derive(Copy, Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash)]
 pub struct ItemIndex(pub usize);
 
 #[derive(Copy, Clone, Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Status {
     /// Can't work on it now
     Blocked,
@@ -74,6 +83,7 @@ pub enum Status {
     Complete,
 }
 
+// -------------------------------- SkillTree impl -------------------
 impl SkillTree {
     pub fn load(path: &Path) -> anyhow::Result<SkillTree> {
         let loaded = &mut HashSet::default();
@@ -152,9 +162,14 @@ impl SkillTree {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
+        // 1. Per-group validation (unknown deps, missing labels).
         for group in self.groups() {
             group.validate(self)?;
         }
+
+        // 2. Cycle detection across the whole graph
+        let groups: Vec<&Group> = self.groups().collect();
+        detect_cycles(&groups)?;
         Ok(())
     }
 
@@ -195,26 +210,78 @@ impl SkillTree {
     }
 }
 
+// ------------------------ Cycle Detection ---------------------
+
+fn detect_cycles(groups: &[&Group]) -> anyhow::Result<()> {
+    // State: 0 = unvisited, 1 = currently on the DFS stack, 2 = fully visited.
+
+    let mut state: HashMap<&str, u8> = HashMap::new();
+
+    let lookup = groups.iter().map(|gr| (gr.name.as_str(), *gr)).collect();
+
+    for group in groups {
+        if state.get(group.name.as_str()).copied().unwrap_or(0) == 0 {
+            dfs(group.name.as_str(), &lookup, &mut state, &mut vec![])?;
+        }
+    }
+
+    Ok(())
+}
+
+fn dfs<'a>(
+    name: &'a str,
+    lookup: &HashMap<&'a str, &'a Group>,
+    state: &mut HashMap<&'a str, u8>,
+    path: &mut Vec<&'a str>,
+) -> anyhow::Result<()> {
+    match state.get(name).copied().unwrap_or(0) {
+        // Already fully explored - nothing to do.
+        2 => return Ok(()),
+        // Back-edge: we've found a cycle.
+        1 => {
+            let cycle_start = path.iter().position(|&n| n == name).unwrap_or(0);
+
+            let cycle = path[cycle_start..].join(" → ") + " → " + name;
+
+            anyhow::bail!(SkillTreeError::CircularDependency { cycle });
+        }
+        _ => {}
+    }
+    state.insert(name, 1);
+    path.push(name);
+
+    if let Some(group) = lookup.get(name) {
+        for dep in group.requires.iter().flatten() {
+            if lookup.contains_key(dep.as_str()) {
+                dfs(dep.as_str(), lookup, state, path)?;
+            }
+        }
+    }
+
+    path.pop();
+    state.insert(name, 2);
+    Ok(())
+}
+
+// ------------------- Group impl -----------------------
 impl Group {
     pub fn validate(&self, tree: &SkillTree) -> anyhow::Result<()> {
-        // check: that `name` is a valid graphviz identifier
-
-        // check: each of the things in requires has the form
-        //        `identifier` or `identifier:port` and that all those
-        //        identifiers map to groups
-
         for group_name in self.requires.iter().flatten() {
             if tree.group_named(group_name).is_none() {
-                anyhow::bail!(
-                    "the group `{}` has a dependency on a group `{}` that does not exist",
-                    self.name,
-                    group_name,
-                )
+                anyhow::bail!(SkillTreeError::UnknownDependency {
+                    group: self.name.clone(),
+                    dep: group_name.clone()
+                })
             }
         }
 
+        // Check that every item has a non-empty label.
         for item in &self.items {
-            item.validate()?;
+            if item.label.trim().is_empty() {
+                anyhow::bail!(SkillTreeError::MissingLabel {
+                    group: self.name.clone()
+                })
+            }
         }
 
         Ok(())
@@ -226,24 +293,24 @@ impl Group {
 }
 
 pub trait ItemExt {
-    fn href(&self) -> Option<&String>;
-    fn label(&self) -> &String;
+    fn href(&self) -> Option<String>;
+    fn label(&self) -> String;
     fn column_value<'me>(&'me self, tree: &'me SkillTree, c: &str) -> &'me str;
     fn validate(&self) -> anyhow::Result<()>;
 }
 
 impl ItemExt for Item {
-    fn href(&self) -> Option<&String> {
-        self.get("href")
+    fn href(&self) -> Option<String> {
+        self.href.clone()
     }
 
-    fn label(&self) -> &String {
-        self.get("label").unwrap()
+    fn label(&self) -> String {
+        self.label.clone()
     }
 
     fn column_value<'me>(&'me self, tree: &'me SkillTree, c: &str) -> &'me str {
-        if let Some(v) = self.get(c) {
-            return v;
+        if let Some(value) = self.attrs.get(c) {
+            return value;
         }
 
         if let Some(doc) = &tree.doc {
@@ -265,5 +332,69 @@ impl ItemExt for Item {
         // check: only contains known keys
 
         Ok(())
+    }
+}
+
+// ------------------------ Item Deserialization ---------------------
+impl<'de> Deserialize<'de> for Item {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ItemVisitor;
+
+        impl<'de> Visitor<'de> for ItemVisitor {
+            type Value = Item;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("an item table with at least a `label` field")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut label = None;
+                let mut href = None;
+                let mut status = None;
+                let mut attrs = HashMap::new();
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "label" => {
+                            label = Some(map.next_value::<String>()?);
+                        }
+                        "href" => {
+                            href = Some(map.next_value::<String>()?);
+                        }
+                        "status" => {
+                            let raw = map.next_value::<String>()?;
+                            match raw.as_str() {
+                                "complete" => status = Some(Status::Complete),
+                                "assigned" => status = Some(Status::Assigned),
+                                "unassigned" => status = Some(Status::Unassigned),
+                                "blocked" => status = Some(Status::Blocked),
+                                _ => {
+                                    attrs.insert(key, raw);
+                                }
+                            }
+                        }
+                        _ => {
+                            let value: toml::Value = map.next_value()?;
+                            if let toml::Value::String(s) = value {
+                                attrs.insert(key, s);
+                            }
+                        }
+                    }
+                }
+                Ok(Item {
+                    label: label.ok_or_else(|| serde::de::Error::missing_field("label"))?,
+                    href,
+                    status,
+                    attrs,
+                })
+            }
+        }
+        deserializer.deserialize_map(ItemVisitor)
     }
 }
