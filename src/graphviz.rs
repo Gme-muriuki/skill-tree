@@ -1,25 +1,21 @@
 use crate::tree::{Graphviz, Group, ItemExt, SkillTree, Status};
-use fehler::throws;
 use std::io::Write;
 
 impl SkillTree {
     /// Writes graphviz representing this skill-tree to the given output.
-    #[throws(anyhow::Error)]
-    pub fn write_graphviz(&self, output: &mut dyn Write) {
-        write_graphviz(self, output)?
+    pub fn write_graphviz(&self, output: &mut dyn Write) -> anyhow::Result<()> {
+        write_graphviz(self, output)
     }
 
     /// Generates a string containing graphviz content for this skill-tree.
-    #[throws(anyhow::Error)]
-    pub fn to_graphviz(&self) -> String {
+    pub fn to_graphviz(&self) -> anyhow::Result<String> {
         let mut output = Vec::new();
         write_graphviz(self, &mut output)?;
-        String::from_utf8(output)?
+        Ok(String::from_utf8(output)?)
     }
 }
 
-#[throws(anyhow::Error)]
-fn write_graphviz(tree: &SkillTree, output: &mut dyn Write) {
+fn write_graphviz(tree: &SkillTree, output: &mut dyn Write) -> anyhow::Result<()> {
     let rankdir = match &tree.graphviz {
         Some(Graphviz {
             rankdir: Some(rankdir),
@@ -54,16 +50,20 @@ fn write_graphviz(tree: &SkillTree, output: &mut dyn Write) {
     for group in tree.groups() {
         if let Some(requires) = &group.requires {
             for requirement in requires {
-                writeln!(output, r#""{}" -> "{}";"#, &group.name, requirement)?;
+                writeln!(output, r#""{}" -> "{}";"#, requirement, &group.name)?;
             }
         }
     }
 
     writeln!(output, r#"}}"#)?;
+    Ok(())
 }
 
-#[throws(anyhow::Error)]
-fn write_cluster(tree: &SkillTree, output: &mut dyn Write, cluster: Option<&String>) {
+fn write_cluster(
+    tree: &SkillTree,
+    output: &mut dyn Write,
+    cluster: Option<&String>,
+) -> anyhow::Result<()> {
     for group in tree.groups() {
         // If we are doing a cluster, the group must be in it;
         // otherwise, the group must not be in any cluster.
@@ -78,6 +78,7 @@ fn write_cluster(tree: &SkillTree, output: &mut dyn Write, cluster: Option<&Stri
         writeln!(output, r#"  margin = 0"#)?;
         writeln!(output, r#"]"#)?;
     }
+    Ok(())
 }
 
 const WATCH_EMOJI: &str = "⌚";
@@ -89,8 +90,11 @@ fn escape(s: &str) -> String {
     htmlescape::encode_minimal(s).replace('\n', "<br/>")
 }
 
-#[throws(anyhow::Error)]
-fn write_group_label(tree: &SkillTree, group: &Group, output: &mut dyn Write) {
+fn write_group_label(
+    tree: &SkillTree,
+    group: &Group,
+    output: &mut dyn Write,
+) -> anyhow::Result<()> {
     writeln!(output, r#"  label = <<table>"#)?;
 
     let label = group.label.as_ref().unwrap_or(&group.name);
@@ -177,11 +181,12 @@ fn write_group_label(tree: &SkillTree, group: &Group, output: &mut dyn Write) {
     }
 
     writeln!(output, r#"  </table>>"#)?;
+    Ok(())
 }
 
 fn attribute_str(label: &str, text: &Option<impl AsRef<str>>, suffix: &str) -> String {
     match text {
-        None => format!(""),
+        None => String::new(),
         Some(t) => format!(" {}=\"{}{}\"", label, t.as_ref(), suffix),
     }
 }
