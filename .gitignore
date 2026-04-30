@@ -1,9 +1,0 @@
-/target
-**/*.rs.bk
-*~
-*.dot
-*.svg
-output
-
-### IDE files
-/.idea/
