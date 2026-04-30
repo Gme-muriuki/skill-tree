@@ -1,4 +1,4 @@
-mod graphviz;
-mod tree;
-pub use tree::*;
-mod test;
+pub mod config;
+pub mod error;
+pub mod github;
+pub mod graph;
