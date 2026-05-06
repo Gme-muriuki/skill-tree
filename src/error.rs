@@ -1,10 +1,10 @@
 //! Top-level error types and exit codes for the skill-tree CLI.
 //! Exit codes: 0 success, 1 general, 2 cycle detected,
 //! 3 GitHub API error, 4 configuration error.
-//! 
+//!
 
-use thiserror::Error;
 use std::path::PathBuf;
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -15,7 +15,7 @@ pub enum ConfigError {
         #[source]
         source: std::io::Error,
     },
- 
+
     /// The file contained invalid TOML or was missing required fields.
     #[error("could not parse config file `{path}`: {source}")]
     Parse {
@@ -23,7 +23,7 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
- 
+
     /// `[colors] github-name` does not match any declared `[[field]]`.
     #[error(
         "`[colors] github-name` is \"{colors_github_name}\" \
@@ -34,19 +34,11 @@ pub enum ConfigError {
         colors_github_name: String,
         declared: String,
     },
- 
+
     /// A value in `[colors.values]` is not a valid CSS hex color.
     #[error(
         "invalid color `{value}` for `{key}` in [colors.values]: \
          expected a hex color like `#4a90d9` or `#fff`"
     )]
     InvalidColor { key: String, value: String },
- 
-    /// No `[[field]]` entries were declared.
-    #[error(
-        "no [[field]] entries found in config.\n\
-         Declare at least one field so skill-tree knows what to fetch."
-    )]
-    NoFields,
 }
- 
