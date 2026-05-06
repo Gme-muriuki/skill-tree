@@ -1,7 +1,7 @@
 //! skill-tree library crate.
 //! Declares the config, github, graph, render, and cli modules.
 
-mod config;
+pub mod config;
 mod error;
 mod github;
 mod graph;
