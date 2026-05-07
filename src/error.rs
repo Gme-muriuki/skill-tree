@@ -1,44 +1,14 @@
-//! Top-level error types and exit codes for the skill-tree CLI.
-//! Exit codes: 0 success, 1 general, 2 cycle detected,
-//! 3 GitHub API error, 4 configuration error.
+//! Error types for skill-tree.
 //!
+//! All errors in skill-tree are organized into modules by origin:
+//! - [`github`] — GitHub API errors
+//! - [`config`] — configuration file errors
+//!
+//! Each error type implements `.exit_code()` to map to the appropriate
+//! process exit code (1, 3, or 4).
 
-use std::path::PathBuf;
-use thiserror::Error;
+pub mod config;
+pub mod github;
 
-#[derive(Debug, Error)]
-pub enum ConfigError {
-    /// The file could not be read from disk.
-    #[error("could not read config file `{path}`: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-
-    /// The file contained invalid TOML or was missing required fields.
-    #[error("could not parse config file `{path}`: {source}")]
-    Parse {
-        path: PathBuf,
-        #[source]
-        source: toml::de::Error,
-    },
-
-    /// `[colors] github-name` does not match any declared `[[field]]`.
-    #[error(
-        "`[colors] github-name` is \"{colors_github_name}\" \
-         but no [[field]] has that github-name.\n\
-         Declared fields: {declared}"
-    )]
-    ColorsFieldNotDeclared {
-        colors_github_name: String,
-        declared: String,
-    },
-
-    /// A value in `[colors.values]` is not a valid CSS hex color.
-    #[error(
-        "invalid color `{value}` for `{key}` in [colors.values]: \
-         expected a hex color like `#4a90d9` or `#fff`"
-    )]
-    InvalidColor { key: String, value: String },
-}
+pub use config::ConfigError;
+pub use github::{GitHubError, NetworkErrorKind};
