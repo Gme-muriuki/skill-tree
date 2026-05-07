@@ -16,7 +16,7 @@
 //! - [`config`]  — reads `.skill-tree.toml`; drives all three stages
 //! - [`github`]  — fetches data from the GitHub GraphQL API
 //! - [`graph`]   — the platform-agnostic data model (nodes + edges)
-//! - [`render`]  — turns a [`graph::Graph`] into Graphviz DOT / SVG
+//! - [`render`]  — turns a [`graph`] into Graphviz DOT / SVG
 //!
 
 pub mod config;

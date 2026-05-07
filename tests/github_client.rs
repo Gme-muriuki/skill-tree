@@ -34,7 +34,7 @@ async fn retries_5xx_then_succeeds_and_returns_data() {
 async fn gives_up_after_max_retries_returning_last_real_error() {
     let gh = MockGitHub::start().await;
     gh.status_with_body(500, "boom")
-        .expect(3) // MAX_RETRIES
+        .expect(3) // MAX_ATTEMPTS
         .mount(&gh.server)
         .await;
 

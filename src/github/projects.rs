@@ -1,3 +1,5 @@
-//! Fetches GitHub Projects V2 items and their custom field values.
-//! Returns typed ProjectItem structs ready for the graph builder.
-//! Handles pagination transparently.
+//! GitHub Projects V2 queries.
+//!
+//! Placeholder: GraphQL queries and typed response structs land in a
+//! follow-up. Pagination is the caller's responsibility — see the loop
+//! pattern documented in `md/design/02-github-client.md`.

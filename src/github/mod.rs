@@ -8,6 +8,7 @@ pub mod projects;
 
 use crate::error::{GitHubError, NetworkErrorKind};
 use reqwest::Client;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
@@ -75,7 +76,15 @@ pub struct GitHubClient {
 impl GitHubClient {
     const DEFAULT_ENDPOINT: &'static str = "https://api.github.com/graphql";
     const API_VERSION: &'static str = "2022-11-28";
-    const MAX_RETRIES: u32 = 3;
+
+    /// Maximum number of HTTP requests per `query()` call: one initial
+    /// attempt plus `MAX_ATTEMPTS - 1` retries.
+    const MAX_ATTEMPTS: u32 = 3;
+
+    /// Wait used when GitHub returns a 429 with no parseable
+    /// `X-RateLimit-Reset` header. One minute is GitHub's documented
+    /// minimum reset window for secondary rate limits.
+    const RATE_LIMIT_FALLBACK_SECS: u64 = 60;
 
     /// Create a new client targeting `https://api.github.com/graphql`,
     /// reading the token from the parameter or the `GITHUB_TOKEN` env var.
@@ -98,9 +107,10 @@ impl GitHubClient {
             .or_else(|| std::env::var("GITHUB_TOKEN").ok())
             .ok_or(GitHubError::MissingToken)?;
 
+        // Per-request timeouts are set in `query_once` from the *remaining*
+        // budget, so a single hung request can't consume the whole timeout.
         let client = Client::builder()
             .user_agent("skill-tree")
-            .timeout(timeout)
             .build()
             .map_err(|e| GitHubError::ClientInit(e.to_string()))?;
 
@@ -114,28 +124,30 @@ impl GitHubClient {
 
     /// Send a GraphQL query with automatic retry and rate limit handling.
     ///
-    /// Retries transient errors up to 3 times with exponential backoff.
-    /// Detects rate limits and waits before retrying when the timeout budget allows.
-    /// Fails if the entire operation exceeds the configured timeout.
+    /// Makes one initial HTTP request plus up to 2 retries on transient
+    /// failures, with exponential backoff between attempts. Detects rate
+    /// limits and waits before retrying when the timeout budget allows.
+    /// Fails with [`GitHubError::Timeout`] if the entire operation exceeds
+    /// the configured timeout.
     pub async fn query<V, T>(&self, query: &str, variables: V) -> Result<T, GitHubError>
     where
         V: Serialize,
-        T: for<'de> Deserialize<'de>,
+        T: DeserializeOwned,
     {
         let start = Instant::now();
 
-        for attempt in 1..=Self::MAX_RETRIES {
+        for attempt in 1..=Self::MAX_ATTEMPTS {
             if start.elapsed() >= self.timeout {
                 return Err(GitHubError::Timeout(self.timeout.as_secs()));
             }
 
-            let err = match self.query_once(query, &variables).await {
+            let err = match self.query_once(query, &variables, start).await {
                 Ok(response) => return Ok(response),
                 Err(err) => err,
             };
 
             // Last attempt: surface whatever we got, no more retries.
-            if attempt == Self::MAX_RETRIES {
+            if attempt == Self::MAX_ATTEMPTS {
                 return Err(err);
             }
 
@@ -161,7 +173,7 @@ impl GitHubClient {
                 eprintln!(
                     "Transient error (attempt {}/{}), retrying in {:?}...",
                     attempt,
-                    Self::MAX_RETRIES,
+                    Self::MAX_ATTEMPTS,
                     backoff
                 );
                 tokio::time::sleep(backoff).await;
@@ -172,24 +184,33 @@ impl GitHubClient {
             return Err(err);
         }
 
-        // Loop body always returns or `continue`s on attempts < MAX_RETRIES,
-        // and always returns on attempt == MAX_RETRIES.
+        // Loop body always returns or `continue`s on attempts < MAX_ATTEMPTS,
+        // and always returns on attempt == MAX_ATTEMPTS.
         unreachable!("retry loop exited without returning")
     }
 
-    /// Send a single GraphQL request without retry logic.
-    async fn query_once<V, T>(&self, query: &str, variables: &V) -> Result<T, GitHubError>
+    /// Send a single GraphQL request without retry logic. The per-request
+    /// timeout is the *remaining* budget so a single hung request cannot
+    /// consume the whole `query()`-level timeout.
+    async fn query_once<V, T>(
+        &self,
+        query: &str,
+        variables: &V,
+        start: Instant,
+    ) -> Result<T, GitHubError>
     where
         V: Serialize,
-        T: for<'de> Deserialize<'de>,
+        T: DeserializeOwned,
     {
         let request = GraphQLRequest { query, variables };
+        let remaining = self.timeout.saturating_sub(start.elapsed());
 
         let response = self
             .client
             .post(&self.endpoint)
             .bearer_auth(&self.token)
             .header("X-GitHub-Api-Version", Self::API_VERSION)
+            .timeout(remaining)
             .json(&request)
             .send()
             .await
@@ -212,11 +233,14 @@ impl GitHubClient {
                     });
 
                 return Err(GitHubError::RateLimited {
-                    retry_after: retry_after.unwrap_or(60),
+                    retry_after: retry_after.unwrap_or(Self::RATE_LIMIT_FALLBACK_SECS),
                 });
             }
 
-            let body = response.text().await.unwrap_or_default();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("<failed to read body: {e}>"));
             return Err(GitHubError::HttpError {
                 status: status.as_u16(),
                 body,
@@ -228,7 +252,10 @@ impl GitHubClient {
             .await
             .map_err(Self::classify_reqwest_error)?;
 
-        if let Some(errors) = body.errors {
+        // GitHub's GraphQL spec says `errors` must contain at least one entry
+        // when present. Treat an empty array the same as no errors so we don't
+        // surface a useless `GraphQLError("")`.
+        if let Some(errors) = body.errors.filter(|e| !e.is_empty()) {
             let message = errors
                 .into_iter()
                 .map(|e| e.message)
@@ -274,8 +301,9 @@ impl GitHubClient {
         }
     }
 
-    /// Exponential backoff with ±20% jitter to avoid thundering herd.
-    /// Attempt 1: ~1s, attempt 2: ~2s, attempt 3: ~4s.
+    /// Delay before retry, with ±20% jitter to avoid thundering herd.
+    /// Called after a failed `attempt` when more retries remain, so for
+    /// `MAX_ATTEMPTS = 3` the inputs are 1 (~1s) and 2 (~2s).
     fn backoff_duration(attempt: u32) -> Duration {
         let base_millis = 1000_u64 * 2_u64.pow(attempt - 1);
         let jitter_pct = rand::random::<u64>() % 21; // 0..=20
