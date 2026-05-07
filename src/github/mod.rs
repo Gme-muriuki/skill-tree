@@ -33,6 +33,31 @@ pub(crate) struct GraphQLErrorResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Pagination types
+// ---------------------------------------------------------------------------
+//
+// GitHub's GraphQL API uses cursor-based pagination on every list ("connection").
+// The transport does not paginate — callers loop, using `Connection<T>` in
+// their response types and reading `page_info` to drive the loop.
+
+/// Page metadata returned by every GitHub GraphQL connection.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageInfo {
+    pub has_next_page: bool,
+    pub end_cursor: Option<String>,
+}
+
+/// A list of `nodes` plus its `page_info`. Embed in your response struct
+/// to get the standard pagination shape.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Connection<T> {
+    pub nodes: Vec<T>,
+    #[serde(rename = "pageInfo")]
+    pub page_info: PageInfo,
+}
+
+// ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
 
@@ -42,19 +67,33 @@ pub(crate) struct GraphQLErrorResponse {
 /// Pass `&GitHubClient` to [`projects`] and [`issues`] functions.
 pub struct GitHubClient {
     client: Client,
+    endpoint: String,
     token: String,
     timeout: Duration,
 }
 
 impl GitHubClient {
-    const ENDPOINT: &'static str = "https://api.github.com/graphql";
+    const DEFAULT_ENDPOINT: &'static str = "https://api.github.com/graphql";
+    const API_VERSION: &'static str = "2022-11-28";
     const MAX_RETRIES: u32 = 3;
 
-    /// Create a new client, reading the token from the parameter or `GITHUB_TOKEN` env var.
+    /// Create a new client targeting `https://api.github.com/graphql`,
+    /// reading the token from the parameter or the `GITHUB_TOKEN` env var.
     ///
     /// Fails immediately with [`GitHubError::MissingToken`] if neither is present,
     /// before any network I/O occurs.
     pub fn new(token: Option<String>, timeout: Duration) -> Result<Self, GitHubError> {
+        Self::with_endpoint(Self::DEFAULT_ENDPOINT.to_string(), token, timeout)
+    }
+
+    /// Like [`Self::new`] but targets the supplied GraphQL endpoint URL.
+    /// Used by integration tests against a mock server; also the foundation
+    /// for any future GitHub Enterprise support.
+    pub fn with_endpoint(
+        endpoint: String,
+        token: Option<String>,
+        timeout: Duration,
+    ) -> Result<Self, GitHubError> {
         let token = token
             .or_else(|| std::env::var("GITHUB_TOKEN").ok())
             .ok_or(GitHubError::MissingToken)?;
@@ -67,6 +106,7 @@ impl GitHubClient {
 
         Ok(Self {
             client,
+            endpoint,
             token,
             timeout,
         })
@@ -147,8 +187,9 @@ impl GitHubClient {
 
         let response = self
             .client
-            .post(Self::ENDPOINT)
+            .post(&self.endpoint)
             .bearer_auth(&self.token)
+            .header("X-GitHub-Api-Version", Self::API_VERSION)
             .json(&request)
             .send()
             .await
@@ -244,5 +285,40 @@ impl GitHubClient {
             base_millis - base_millis * jitter_pct / 100
         };
         Duration::from_millis(signed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Deserialize)]
+    struct Issue {
+        number: u64,
+    }
+
+    #[test]
+    fn connection_deserializes_from_github_shape() {
+        let json = r#"{
+            "nodes": [{"number": 1}, {"number": 2}],
+            "pageInfo": {
+                "hasNextPage": true,
+                "endCursor": "Y3Vyc29yOjEw"
+            }
+        }"#;
+
+        let conn: Connection<Issue> = serde_json::from_str(json).unwrap();
+        assert_eq!(conn.nodes.len(), 2);
+        assert_eq!(conn.nodes[0].number, 1);
+        assert!(conn.page_info.has_next_page);
+        assert_eq!(conn.page_info.end_cursor.as_deref(), Some("Y3Vyc29yOjEw"));
+    }
+
+    #[test]
+    fn page_info_handles_null_end_cursor_on_last_page() {
+        let json = r#"{"hasNextPage": false, "endCursor": null}"#;
+        let info: PageInfo = serde_json::from_str(json).unwrap();
+        assert!(!info.has_next_page);
+        assert!(info.end_cursor.is_none());
     }
 }

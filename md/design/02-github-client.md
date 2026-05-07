@@ -23,11 +23,14 @@ The actual GraphQL queries (fields, shapes, variables) live in `projects.rs` and
 pub struct GitHubClient { ... }
 
 impl GitHubClient {
-    /// Construct a client. Reads token from --token or GITHUB_TOKEN env var.
-    /// Fails immediately if neither is present.
-    pub async fn new(token: Option<String>, timeout: Duration) -> Result<Self, GitHubError>;
+    /// Construct a client. Reads the token from the parameter or the
+    /// `GITHUB_TOKEN` env var. Synchronous; does no I/O.
+    pub fn new(token: Option<String>, timeout: Duration) -> Result<Self, GitHubError>;
 
-    /// Send a GraphQL query. Handles retries, rate limits, pagination.
+    /// Send a single GraphQL request. Handles retries and rate limits.
+    /// Returns the typed `data` field of the response.
+    ///
+    /// Pagination is the caller's responsibility — see the Pagination section.
     pub async fn query<V: Serialize, T: DeserializeOwned>(
         &self,
         query: &str,
@@ -41,7 +44,10 @@ Callers construct the client once at startup. The client:
 - Stores the authentication token
 - Stores the timeout duration
 - Implements retry logic and rate limit backoff
-- Follows pagination cursors transparently
+
+Errors do not carry caller context (which project, which query name).
+Callers wrap errors at the call site if they need it; this keeps the
+transport layer focused on transport.
 
 ## Authentication
 
@@ -79,15 +85,14 @@ plus retries exceed the timeout, the client returns `GitHubError::Timeout`.
 
 Transient errors are retried with exponential backoff and jitter:
 
-- Network timeouts
+- Network failures (timeout, connection refused, DNS, TLS)
 - HTTP 5xx (GitHub service errors)
-- HTTP 429 (rate limited)
-- Temporary DNS failures
+- HTTP 429 (rate limited; see [Rate limiting](#rate-limiting) for the policy)
 
 Retry policy:
 - Up to 3 attempts
-- Exponential backoff: 1s, 2s, 4s between attempts
-- Jitter: ±10% to avoid thundering herd
+- Exponential backoff: ~1s, ~2s, ~4s between attempts
+- Jitter: ±20% to avoid thundering herd
 - Does not exceed the overall request timeout
 
 Non-transient errors (4xx except 429, GraphQL validation errors, auth failures)
@@ -104,39 +109,68 @@ hits the rate limit (HTTP 429):
 4. Sleep until the reset time
 5. Retry the request
 
-If the reset time is more than 60 seconds away, return `GitHubError::RateLimited`
-with the retry-after value instead of waiting. The caller can decide whether to
-retry or fail.
+The client only sleeps if the wait fits within the *remaining* request
+timeout. If the reset is further away than the time we have left, it
+returns `GitHubError::RateLimited { retry_after }` immediately so the
+caller can decide whether to wait or fail. There is no fixed 60-second
+threshold — the budget is the timeout.
 
 ## Pagination
 
-GitHub's GraphQL API uses cursor-based pagination. A query response looks like:
+GitHub's GraphQL API uses cursor-based pagination. The transport does **not**
+hide pagination — it sends one request and returns one response. Pagination
+loops live in the caller (`projects.rs`, `issues.rs`) where the query and
+response shape are known.
 
-```json
-{
-  "data": {
-    "repository": {
-      "issues": {
-        "edges": [ ... ],
-        "pageInfo": {
-          "hasNextPage": true,
-          "endCursor": "Y3Vyc29yOjEw"
-        }
-      }
-    }
-  }
+Rationale: making pagination transparent in `query()` requires the transport
+to know where, in an arbitrary `T`, the `pageInfo` and node list live. That
+either forces a `Paginated` trait on every response type or hides query-shape
+knowledge inside the transport. Both are worse than a small explicit loop in
+the caller, which already owns the query.
+
+The transport provides two reusable types so callers don't redefine them:
+
+```rust
+/// Page metadata returned by every GitHub GraphQL connection.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageInfo {
+    pub has_next_page: bool,
+    pub end_cursor: Option<String>,
+}
+
+/// A connection: a list of `nodes` plus `pageInfo`. Embed in your response
+/// type to use the standard pagination loop.
+#[derive(Debug, Deserialize)]
+pub struct Connection<T> {
+    pub nodes: Vec<T>,
+    #[serde(rename = "pageInfo")]
+    pub page_info: PageInfo,
 }
 ```
 
-The client's `query()` function:
-- Accepts a query string with a `$after` variable for the cursor
-- Returns only the `data` field (not the pageInfo)
-- Automatically follows `hasNextPage`, fetching all pages
-- Accumulates results into a single response
-- Is transparent to the caller — they see one response with all data
+A caller-side pagination loop looks like this:
 
-The query must use `first: N` to set page size and `after: $after` for the cursor.
-The client handles following cursors automatically.
+```rust
+let mut all = Vec::new();
+let mut cursor: Option<String> = None;
+loop {
+    let resp: MyResponse = client
+        .query(QUERY, MyVars { after: cursor.clone(), .. })
+        .await?;
+    let conn = resp.repository.issues; // Connection<Issue>
+    all.extend(conn.nodes);
+    if !conn.page_info.has_next_page { break; }
+    cursor = conn.page_info.end_cursor;
+}
+```
+
+The query must declare `first: N` for page size and `after: $after` for the
+cursor variable. Beyond that, it's the caller's GraphQL.
+
+A generic `paginate(...)` helper in the transport is intentionally not
+provided yet — there are only two callers, and the loop pattern is short.
+Add a helper if a third caller appears.
 
 ## Timeout configuration
 
@@ -162,34 +196,42 @@ the timeout, the client returns `GitHubError::Timeout`.
 #[derive(Debug, thiserror::Error)]
 pub enum GitHubError {
     /// No token in --token or GITHUB_TOKEN environment variable.
-    #[error("no GitHub token found. Set GITHUB_TOKEN or use --token flag")]
     MissingToken,
 
-    /// Network failure: timeout, DNS, TLS error, connection refused, etc.
-    #[error("network error: {0}")]
-    Network(#[from] reqwest::Error),
+    /// HTTP client could not be constructed (TLS backend, proxy config, etc.).
+    ClientInit(String),
 
-    /// HTTP response with 4xx or 5xx status.
-    #[error("HTTP {status}: {body}")]
+    /// Network-level failure with a sub-category.
+    Network { kind: NetworkErrorKind, message: String },
+
+    /// HTTP response with error status code (4xx or 5xx).
     HttpError { status: u16, body: String },
 
-    /// GraphQL response contained errors (in the errors field).
-    #[error("GraphQL error: {0}")]
+    /// GraphQL response contained errors in the `errors` field.
     GraphQLError(String),
 
-    /// Rate limit exceeded and reset is >60 seconds away.
-    #[error("rate limit exceeded, retry after {retry_after} seconds")]
+    /// GitHub returned a body we could not interpret: malformed JSON,
+    /// or a well-formed envelope with neither `data` nor `errors`.
+    InvalidResponse(String),
+
+    /// Rate limit exceeded; see Rate limiting for when the client waits
+    /// vs. surfaces this to the caller.
     RateLimited { retry_after: u64 },
 
-    /// Request exceeded the configured timeout.
-    #[error("request timeout after {0}s")]
+    /// Overall budget (timeout) exceeded across attempts.
     Timeout(u64),
-
-    /// JSON parsing or serialization failure.
-    #[error("JSON error: {0}")]
-    JsonError(#[from] serde_json::Error),
 }
+
+pub enum NetworkErrorKind { Timeout, Connection, Other(String) }
 ```
+
+Exit codes (via `GitHubError::exit_code()`):
+- 1 — `InvalidResponse` (malformed upstream body; likely a regression)
+- 3 — `Network`, `HttpError`, `GraphQLError`, `RateLimited`, `Timeout`
+- 4 — `MissingToken`, `ClientInit` (configuration / environment)
+
+Errors do not carry a `context` field. Callers that want to attach which
+project or query failed wrap the error at their call site.
 
 ## Module structure
 
@@ -206,20 +248,32 @@ provide typed response structs. They call `client.query()` for transport.
 ## Example usage
 
 ```rust
-// Construct the client once at startup
-let client = GitHubClient::new(token_from_cli, Duration::from_secs(30)).await?;
+// Construct the client once at startup. Synchronous, no I/O.
+let client = GitHubClient::new(token_from_cli, Duration::from_secs(30))?;
 
-// Use it to fetch project data
-let issues: ProjectIssues = client.query(
-    FETCH_ISSUES_QUERY,
-    FetchIssuesVars { owner: "rust-lang", ... }
+// Single request — no pagination loop:
+let project: ProjectMeta = client.query(
+    FETCH_PROJECT_META_QUERY,
+    FetchProjectMetaVars { owner: "rust-lang", project: 42 },
 ).await?;
 
-// The client handles:
-// - Pagination (fetches all pages automatically)
-// - Rate limits (waits and retries)
+// Paginated fetch — loop lives here in the caller:
+let mut all = Vec::new();
+let mut cursor: Option<String> = None;
+loop {
+    let resp: FetchIssuesResponse = client.query(
+        FETCH_ISSUES_QUERY,
+        FetchIssuesVars { owner: "rust-lang", project: 42, after: cursor.clone() },
+    ).await?;
+    all.extend(resp.repository.issues.nodes);
+    if !resp.repository.issues.page_info.has_next_page { break; }
+    cursor = resp.repository.issues.page_info.end_cursor;
+}
+
+// The client handles, on each call to query():
+// - Rate limits (waits and retries when budget allows)
 // - Transient errors (retries with backoff)
-// - Timeouts (fails if exceeded)
+// - Overall request timeout
 ```
 
 ## What we are not doing (v2 scope)
