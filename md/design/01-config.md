@@ -4,6 +4,9 @@ skill-tree is configured via a `.skill-tree.toml` file in the current
 directory. This file tells skill-tree which GitHub Project to read and
 how to display what it finds.
 
+Configuration is read once at startup. Changes to `.skill-tree.toml` take
+effect on the next invocation.
+
 ## Field auto-discovery
 
 skill-tree fetches **all** custom fields GitHub returns for every project
@@ -13,7 +16,8 @@ declare a field to have it fetched.
 `[[field]]` entries are display declarations only — they give a field a
 friendly `display-name` for CLI output. Fields not declared in `[[field]]`
 are still fetched and stored on each node. Adding a new `[[field]]` entry
-or a new `[[color-rule]]` later does not require changing what gets fetched.
+or a new value in `[colors.values]` later does not require changing what
+gets fetched.
 
 ## File format
 
@@ -53,7 +57,7 @@ Identifies the GitHub Project to fetch data from.
 
 For `github.com/orgs/rust-lang/projects/42`, `owner` is `"rust-lang"`
 and `project` is `42`. For a user project at
-`github.com/users/nikomatsakis/projects/1`, `owner` is `"nikomatsakis"`.
+`github.com/users/your-username/projects/1`, `owner` is `"your-username"`.
 
 ### `[[field]]`
 
@@ -66,7 +70,7 @@ output. Optional — skill-tree fetches all fields regardless.
 | `github-name` | string | Exact field name as it appears in GitHub Projects |
 
 `github-name` is case-sensitive and must match the field name in GitHub
-Projects character for character. Unknown keys are rejected.
+Projects character for character. Unknown keys are rejected at parse time.
 
 ### `[colors]`
 
@@ -86,14 +90,27 @@ Projects exactly, including case and spacing.
 Nodes whose field value does not appear in `[colors.values]` render with
 the default gray (`#dddddd`).
 
+## The `SkillTree` application context
+
+The parsed `Config` is wrapped in a `SkillTree` struct that also carries
+the directory containing the config file. The rest of the pipeline takes
+`&SkillTree` rather than `&Config` directly — this keeps configuration
+threading explicit and avoids global state. Constructors:
+
+- `SkillTree::from_dir(dir)` — load from a directory (production and tests)
+- `SkillTree::from_path(path)` — load from an explicit file path
+
 ## Validation
 
-skill-tree validates the config file on startup and fails with exit code 4
-if any of the following are true:
+After parsing, skill-tree runs validation on the config and fails with
+exit code 4 if any value in `[colors.values]` is not a valid hex color
+(`#rgb` or `#rrggbb`).
 
-- `[github]` is missing or incomplete
-- Any value in `[colors.values]` is not a valid hex color (`#rgb` or `#rrggbb`)
-- A `[[field]]` entry contains unknown keys
+Other failures happen at parse time, not validation time:
+
+- Missing `[github]` or its required keys
+- A `[[field]]` entry with unknown keys
+- Type mismatches on any field
 
 ## Example: minimal config
 
@@ -101,7 +118,7 @@ The smallest valid config — no field declarations, no colors:
 
 ```toml
 [github]
-owner   = "nikomatsakis"
+owner   = "your-org"
 project = 1
 ```
 
@@ -155,3 +172,14 @@ github-name = "Status"
 "Complete"    = "#57a85a"
 "Not Started" = "#888888"
 ```
+
+## Common pitfalls
+
+- **Case mismatch on `github-name`.** `"status"` and `"Status"` are different
+  fields. The value must match GitHub's field header character for character.
+- **Forgetting the `#` on a hex color.** `"4a90d9"` is rejected. The leading
+  `#` is required.
+- **Quoting numeric values.** `project = "42"` is rejected — the field is
+  an integer, not a string.
+- **Mixing case in `[colors.values]` keys.** `"in progress"` does not match
+  `"In Progress"`. Match GitHub's option names exactly.
