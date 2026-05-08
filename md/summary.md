@@ -14,8 +14,8 @@
 
 # Design
 
-- [Configuration](./design/01-config.md)
-- [GitHub client](./design/02-github-client.md)
+- [Configuration](./design/config.md)
+- [GitHub client](./design/github-client.md)
 - [Project fetching](./design/project-fetch.md)
 
 # Contribution guide
