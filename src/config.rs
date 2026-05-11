@@ -452,9 +452,18 @@ mod tests {
                     name: "Status".into(),
                     kind: FieldKind::SingleSelect {
                         options: vec![
-                            FieldOption { id: "o1".into(), name: "Done".into() },
-                            FieldOption { id: "o2".into(), name: "In Progress".into() },
-                            FieldOption { id: "o3".into(), name: "Blocked".into() },
+                            FieldOption {
+                                id: "o1".into(),
+                                name: "Done".into(),
+                            },
+                            FieldOption {
+                                id: "o2".into(),
+                                name: "In Progress".into(),
+                            },
+                            FieldOption {
+                                id: "o3".into(),
+                                name: "Blocked".into(),
+                            },
                         ],
                     },
                 },
