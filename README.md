@@ -63,12 +63,14 @@ github-name = "Status"
 `owner` is the GitHub organization or user that owns the project.
 `project` is the project number from the GitHub Projects URL.
 
-Each `[[field]]` entry declares a GitHub Projects custom field that
-skill-tree should read. `github-name` is the field name as it appears
-in GitHub. `display-name` is how skill-tree refers to it internally.
+skill-tree fetches all custom fields GitHub returns automatically. `[[field]]`
+entries are display declarations only — they give a field a friendly
+`display-name` for CLI output. Fields not declared in `[[field]]` are still
+fetched and stored on each node.
 
 `[colors]` specifies which GitHub field drives node color (`github-name`)
 and maps that field's option values to hex colors (`[colors.values]`).
+The entire section is optional — if omitted, all nodes render gray.
 
 ## Installation
 

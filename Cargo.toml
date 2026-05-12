@@ -10,7 +10,14 @@ homepage = "https://github.com/nikomatsakis/skill-tree"
 
 
 [dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2.0.18"
+toml = "1.1.2"
 
 
 [workspace]
 members = ["./", "./skill-tree-testlib"]
+
+[dev-dependencies]
+indoc = "2.0.7"
+tempfile = "3.27.0"

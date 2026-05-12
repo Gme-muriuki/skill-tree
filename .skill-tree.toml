@@ -10,6 +10,10 @@ github-name  = "Status"
 display-name = "priority"
 github-name  = "Priority"
 
+[[field]]
+display-name = "assignee"
+github-name  = "Assignee"
+
 [colors]
 github-name = "Status"
 
@@ -17,3 +21,4 @@ github-name = "Status"
 "In Progress" = "#4a90d9"
 "Blocked"     = "#e05252"
 "Complete"    = "#57a85a"
+"Not Started" = "#888888"
