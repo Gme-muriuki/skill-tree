@@ -1,2 +1,4 @@
-//! Fetches issue relationships: sub-issues and blocking dependencies.
-//! Returns typed IssueRelationships structs ready for the graph builder.
+//! Issue relationships: sub-issues and blocking dependencies.
+//!
+//! Placeholder: GraphQL queries and typed response structs land in a
+//! follow-up.

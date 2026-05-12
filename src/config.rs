@@ -13,7 +13,7 @@
 //! friendly `display-name` for CLI output.
 //! Fields not declared in `[[field]]` are still fetched and stored on each node.
 
-use crate::error::ConfigError;
+use crate::error::config::ConfigError;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
